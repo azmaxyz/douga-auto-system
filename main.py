@@ -1,8 +1,6 @@
 """
-Enhanced Cloud Run Service with Shopify Integration (Final Version)
-動画処理とShopify商品自動登録を統合したCloud Runサービス
+Enhanced Cloud Run Service with Shopify Integration (Final Diagnostic Version)
 """
-
 import os
 import tempfile
 import ffmpeg
@@ -13,9 +11,12 @@ from google.cloud import storage, firestore, videointelligence, secretmanager
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 import requests
+import traceback
+
+# --- ロギング設定の強化 ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- 初期設定 ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT', 'douga-auto-system')
 ORIGINALS_BUCKET = os.getenv('ORIGINALS_BUCKET', 'douga-auto-system-originals')
 PROCESSED_BUCKET = os.getenv('PROCESSED_BUCKET', 'douga-auto-system-processed')
@@ -32,13 +33,20 @@ secret_client = secretmanager.SecretManagerServiceClient()
 app = Flask(__name__)
 
 def get_shopify_access_token():
-    secret_name = f"projects/{PROJECT_ID}/secrets/shopify-admin-api-token/versions/latest"
-    response = secret_client.access_secret_version(request={"name": secret_name})
-    return response.payload.data.decode("UTF-8")
+    try:
+        secret_name = f"projects/{PROJECT_ID}/secrets/shopify-admin-api-token/versions/latest"
+        response = secret_client.access_secret_version(request={"name": secret_name})
+        token = response.payload.data.decode("UTF-8").strip()
+        logging.info(f"Successfully retrieved token of length {len(token)}")
+        return token
+    except Exception as e:
+        logging.error(f"Failed to get Shopify access token: {e}", exc_info=True)
+        raise
 
 @dataclass
 class VideoProduct:
     title: str; description: str; price: float; preview_video_url: str; main_video_url: str; ai_tags: List[str]; original_filename: str
+
 class ShopifyAPIClient:
     def __init__(self, shop_domain: str, access_token: str):
         self.shop_domain = shop_domain.replace('https://','').replace('http://','')
@@ -46,77 +54,73 @@ class ShopifyAPIClient:
         self.access_token = access_token
         self.base_url = f"https://{self.shop_domain}/admin/api/2024-04"
         self.headers = {'X-Shopify-Access-Token': self.access_token, 'Content-Type': 'application/json'}
-    def create_product(self, video_product: VideoProduct) -> Optional[Dict]:
-        product_data = {"product": {"title": video_product.title, "body_html": video_product.description, "vendor": "縦型動画フリー", "product_type": "デジタル動画", "tags": ", ".join(video_product.ai_tags), "variants": [{"price": str(video_product.price), "inventory_management": None, "inventory_policy": "continue", "requires_shipping": False}], "metafields": [{"namespace": "custom", "key": "preview_video_url", "value": video_product.preview_video_url, "type": "url"}, {"namespace": "custom", "key": "main_video_url", "value": video_product.main_video_url, "type": "url"}, {"namespace": "custom", "key": "ai_tags", "value": json.dumps(video_product.ai_tags), "type": "list.single_line_text_field"}, {"namespace": "custom", "key": "original_filename", "value": video_product.original_filename, "type": "single_line_text_field"}]}}
+    
+    def create_product(self, product_data: dict) -> Optional[Dict]:
+        logging.info("--- Preparing to send request to Shopify ---")
+        logging.info(f"Request URL: {self.base_url}/products.json")
+        masked_headers = self.headers.copy()
+        if 'X-Shopify-Access-Token' in masked_headers:
+            masked_headers['X-Shopify-Access-Token'] = '***REDACTED***'
+        logging.info(f"Request Headers: {json.dumps(masked_headers, indent=2)}")
+        logging.info(f"Request Body: {json.dumps(product_data, indent=2, ensure_ascii=False)}")
+        
         try:
             response = requests.post(f"{self.base_url}/products.json", headers=self.headers, json=product_data, timeout=30)
+            logging.info("--- Received response from Shopify ---")
+            logging.info(f"Response Status Code: {response.status_code}")
+            logging.info(f"Response Headers: {json.dumps(dict(response.headers), indent=2)}")
+            logging.info(f"Response Body: {response.text}")
+            
             if response.status_code == 201:
-                product = response.json()['product']; logging.info(f"商品作成成功: {product['title']} (ID: {product['id']})"); return product
+                product = response.json()['product']
+                logging.info(f"SUCCESS: Product creation successful: {product['title']} (ID: {product['id']})")
+                return product
             else:
-                logging.error(f"商品作成失敗: {response.status_code} - {response.text}"); return None
+                logging.error(f"FAILED: Shopify API returned non-201 status.")
+                return None
         except Exception as e:
-            logging.error(f"商品作成中に予期しないエラー: {e}", exc_info=True); return None
-def create_video_product_from_data(filename: str, processed_url: str, original_url: str, tags: List[str]) -> VideoProduct:
-    title = f"縦型動画 - {os.path.splitext(filename)[0].replace('_', ' ').title()}"
-    description = f"この動画には以下の要素が含まれています：{', '.join(tags[:5])}。高品質な縦型動画コンテンツをお楽しみください。" if tags else "高品質な縦型動画コンテンツです。"
-    return VideoProduct(title=title, description=description, price=DEFAULT_PRODUCT_PRICE, preview_video_url=processed_url, main_video_url=original_url, ai_tags=tags, original_filename=filename)
+            logging.error(f"EXCEPTION during Shopify API call: {e}", exc_info=True)
+            return None
 
+# ★★★★★ ここからが新しい診断用コード ★★★★★
+@app.route('/test-shopify')
+def shopify_test_endpoint():
+    logging.info("--- Shopify Test Endpoint Triggered ---")
+    try:
+        token = get_shopify_access_token()
+        if not token:
+            return "Failed to get Shopify token from Secret Manager", 500
+
+        client = ShopifyAPIClient(SHOPIFY_SHOP_DOMAIN, token)
+        
+        test_product_payload = {
+            "product": {
+                "title": f"API Test Product - {os.urandom(4).hex()}",
+                "body_html": "<strong>This is a test product created via API call.</strong>",
+                "vendor": "API Test",
+                "product_type": "Digital Goods",
+                "status": "draft"
+            }
+        }
+        
+        result = client.create_product(test_product_payload)
+        
+        if result:
+            return f"<h1>Success!</h1><p>Product created with ID: {result.get('id')}</p><pre>{json.dumps(result, indent=2, ensure_ascii=False)}</pre>", 200
+        else:
+            return "<h1>Failed.</h1><p>Check the Cloud Run logs for detailed request/response information.</p>", 500
+            
+    except Exception as e:
+        logging.error(f"Critical error in /test-shopify endpoint: {e}", exc_info=True)
+        return f"<h1>Internal Server Error</h1><p>{traceback.format_exc()}</p>", 500
+# ★★★★★ ここまでが新しい診断用コード ★★★★★
+
+# 元の動画処理用のエンドポイント
 @app.route('/', methods=['POST'])
 def index():
-    try:
-        event_data = request.get_json(); bucket_name = event_data['bucket']; file_name = event_data['name']
-        logging.info(f"Received event for file: {file_name} in bucket: {bucket_name}")
-        process_video_file(bucket_name, file_name)
-        return "OK", 200
-    except Exception as e:
-        logging.error(f"Unhandled error in main handler: {e}", exc_info=True); return "Internal Server Error", 500
-
-def process_video_file(bucket_name, file_name):
-    with tempfile.TemporaryDirectory() as temp_dir:
-        original_video_path = os.path.join(temp_dir, file_name)
-        watermark_path = WATERMARK_FILE
-        processed_video_path = os.path.join(temp_dir, f"processed_{file_name}")
-        try:
-            logging.info(f"Step 1: Downloading original video...")
-            download_blob(bucket_name, file_name, original_video_path)
-            logging.info(f"Step 2: Adding watermark from local file...")
-            add_watermark(original_video_path, watermark_path, processed_video_path)
-            logging.info(f"Step 3: Uploading processed video...")
-            processed_blob = upload_blob(PROCESSED_BUCKET, os.path.basename(processed_video_path), processed_video_path)
-            processed_url = f"https://storage.googleapis.com/{PROCESSED_BUCKET}/{processed_blob.name}"
-            logging.info(f"Step 4: Analyzing video...")
-            tags = analyze_video_tags(f"gs://{bucket_name}/{file_name}")
-            logging.info(f"Step 5: Creating Shopify product...")
-            original_url = f"https://storage.googleapis.com/{bucket_name}/{file_name}"
-            client = ShopifyAPIClient(SHOPIFY_SHOP_DOMAIN, get_shopify_access_token())
-            video_product = create_video_product_from_data(file_name, processed_url, original_url, tags)
-            result = client.create_product(video_product)
-            if result:
-                save_to_firestore(file_name, processed_url, original_url, tags, "SUCCESS")
-                logging.info(f"SUCCESS: All processing completed for {file_name}")
-            else:
-                raise Exception("Shopify product creation failed")
-        except Exception as e:
-            logging.error(f"Failed to process {file_name}: {e}", exc_info=True)
-            save_error_to_firestore(file_name, str(e))
-            raise
-
-def download_blob(bucket_name, source_blob_name, destination_file_name):
-    storage_client.bucket(bucket_name).blob(source_blob_name).download_to_filename(destination_file_name)
-def upload_blob(bucket_name, destination_blob_name, source_file_name):
-    blob = storage_client.bucket(bucket_name).blob(destination_blob_name); blob.upload_from_filename(source_file_name); return blob
-def add_watermark(input_path, watermark_path, output_path):
-    try:
-        ffmpeg.input(input_path).overlay(ffmpeg.input(watermark_path), x='W-w-10', y='H-h-10').output(output_path, vcodec='libx264', preset='fast', crf=23, acodec='copy').run(capture_stdout=True, capture_stderr=True, overwrite_output=True)
-    except ffmpeg.Error as e:
-        logging.error(f"FFmpeg error: {e.stderr.decode('utf8')}"); raise
-def analyze_video_tags(gcs_uri):
-    result = video_intelligence_client.annotate_video(request={"features": [videointelligence.Feature.LABEL_DETECTION], "input_uri": gcs_uri}).result(timeout=900)
-    return sorted(list(set([item.entity.description for item in result.annotation_results[0].segment_label_annotations])))
-def save_to_firestore(file_name, processed_url, original_url, tags, shopify_status):
-    doc_ref = firestore_client.collection('videos').document(file_name); doc_data = {'original_file': file_name, 'processed_url': processed_url, 'original_url': original_url, 'tags': tags, 'status': 'PROCESSED_SUCCESS', 'processed_at': firestore.SERVER_TIMESTAMP, 'shopify_status': shopify_status}; doc_ref.set(doc_data)
-def save_error_to_firestore(filename: str, error_message: str):
-    firestore_client.collection('videos').document(filename).set({'original_file': filename, 'status': 'PROCESSING_FAILED', 'error_message': error_message, 'processed_at': firestore.SERVER_TIMESTAMP}, merge=True)
+    # 本番用の動画処理は、テストが成功するまで一旦何もしないようにします
+    logging.info("Main endpoint received a request, but is currently disabled for testing.")
+    return "OK, but processing is disabled pending diagnostics.", 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
