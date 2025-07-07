@@ -1,24 +1,16 @@
-# Use the official lightweight Python image.
-FROM python:3.11-slim
+# より安定したDebian 11 (bullseye) ベースのイメージを使用
+FROM python:3.12-bullseye
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-        && rm -rf /var/lib/apt/lists/*
+# ffmpegを確実にインストール
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 
-        # Set the working directory
-        WORKDIR /app
+# アプリケーションのコードと依存関係をコピー
+WORKDIR /app
+COPY . .
+RUN pip install --no-cache-dir -r requirements.txt
 
-        # Copy requirements and install Python dependencies
-        COPY requirements.txt .
-        RUN pip install --no-cache-dir -r requirements.txt
+# ffmpegがインストールされているかビルド時に確認（保険）
+RUN which ffmpeg
 
-        # Copy the source code and watermark image
-        COPY main.py .
-        COPY watermark.png .
-
-        # Expose the port the app runs on
-        EXPOSE 8080
-
-        # Run the application
-        CMD ["gunicorn", "--bind", "0.0.0.0:8080", "main:app"]
+# Gunicornでサービスを実行
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 main:app
