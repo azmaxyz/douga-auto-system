@@ -61,7 +61,6 @@ class ShopifyAPIClient:
         masked_headers = self.headers.copy()
         if 'X-Shopify-Access-Token' in masked_headers:
             masked_headers['X-Shopify-Access-Token'] = '***REDACTED***'
-        logging.info(f"Request Headers: {json.dumps(masked_headers, indent=2)}")
         logging.info(f"Request Body: {json.dumps(product_data, indent=2, ensure_ascii=False)}")
         
         try:
@@ -82,7 +81,6 @@ class ShopifyAPIClient:
             logging.error(f"EXCEPTION during Shopify API call: {e}", exc_info=True)
             return None
 
-# ★★★★★ ここからが新しい診断用コード ★★★★★
 @app.route('/test-shopify')
 def shopify_test_endpoint():
     logging.info("--- Shopify Test Endpoint Triggered ---")
@@ -113,14 +111,11 @@ def shopify_test_endpoint():
     except Exception as e:
         logging.error(f"Critical error in /test-shopify endpoint: {e}", exc_info=True)
         return f"<h1>Internal Server Error</h1><p>{traceback.format_exc()}</p>", 500
-# ★★★★★ ここまでが新しい診断用コード ★★★★★
 
-# 元の動画処理用のエンドポイント
-@app.route('/', methods=['POST'])
+@app.route('/')
 def index():
-    # 本番用の動画処理は、テストが成功するまで一旦何もしないようにします
     logging.info("Main endpoint received a request, but is currently disabled for testing.")
-    return "OK, but processing is disabled pending diagnostics.", 200
+    return "OK, but video processing is disabled pending diagnostics.", 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
