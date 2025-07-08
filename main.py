@@ -84,7 +84,7 @@ class ShopifyAPIClient:
             return None
 
 # ★★★★★ ここからが診断用コード ★★★★★
-@app.route('/test-shopify')
+@app.route('/test-shopify', methods=['GET'])
 def shopify_test_endpoint():
     logging.info("--- Shopify Test Endpoint Triggered ---")
     try:
