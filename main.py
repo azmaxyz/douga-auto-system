@@ -1,5 +1,5 @@
 """
-Enhanced Cloud Run Service with Shopify Integration (Final Confirmed Version)
+Enhanced Cloud Run Service with Shopify Integration (Final Diagnostic Version)
 """
 import os
 import tempfile
@@ -13,48 +13,54 @@ from typing import Dict, List, Optional
 import requests
 import traceback
 
+# --- ロギング設定の強化 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# --- 初期設定 ---
 PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT', 'douga-auto-system')
-ORIGINALS_BUCKET = os.getenv('ORIGINALS_BUCKET', 'douga-auto-system-originals')
-PROCESSED_BUCKET = os.getenv('PROCESSED_BUCKET', 'douga-auto-system-processed')
-WATERMARK_FILE = 'watermark.png'
 SHOPIFY_SHOP_DOMAIN = os.getenv('SHOPIFY_SHOP_DOMAIN', 'tategatafree.myshopify.com')
-DEFAULT_PRODUCT_PRICE = float(os.getenv('DEFAULT_PRODUCT_PRICE', '500.0'))
 
-storage_client = storage.Client()
-firestore_client = firestore.Client()
-video_intelligence_client = videointelligence.VideoIntelligenceServiceClient()
+# Google Cloudクライアント
 secret_client = secretmanager.SecretManagerServiceClient()
-
 app = Flask(__name__)
 
 def get_shopify_access_token():
+    """Secret ManagerからShopify APIトークンを取得し、必ず文字列として返す"""
     try:
         secret_name = f"projects/{PROJECT_ID}/secrets/shopify-admin-api-token/versions/latest"
         response = secret_client.access_secret_version(request={"name": secret_name})
         token = response.payload.data.decode("UTF-8").strip()
+        logging.info(f"Successfully retrieved token of length {len(token)}")
         return token
     except Exception as e:
         logging.error(f"Failed to get Shopify access token: {e}", exc_info=True)
         raise
 
 class ShopifyAPIClient:
+    """Shopify Admin API クライアント"""
     def __init__(self, shop_domain: str, access_token: str):
         self.shop_domain = shop_domain.replace('https://','').replace('http://','').split('/')[0]
         self.access_token = access_token
         self.base_url = f"https://{self.shop_domain}/admin/api/2024-04"
         self.headers = {'X-Shopify-Access-Token': self.access_token, 'Content-Type': 'application/json'}
-    
+
     def create_product(self, product_data: dict) -> Optional[Dict]:
+        """Shopifyに商品を作成し、詳細なログを出力する"""
         logging.info("--- Preparing to send request to Shopify ---")
         logging.info(f"Request URL: {self.base_url}/products.json")
+        masked_headers = self.headers.copy()
+        if 'X-Shopify-Access-Token' in masked_headers:
+            masked_headers['X-Shopify-Access-Token'] = '***REDACTED***'
+        logging.info(f"Request Headers: {json.dumps(masked_headers, indent=2)}")
         logging.info(f"Request Body: {json.dumps(product_data, indent=2, ensure_ascii=False)}")
+        
         try:
             response = requests.post(f"{self.base_url}/products.json", headers=self.headers, json=product_data, timeout=30)
             logging.info("--- Received response from Shopify ---")
             logging.info(f"Response Status Code: {response.status_code}")
+            logging.info(f"Response Headers: {json.dumps(dict(response.headers), indent=2)}")
             logging.info(f"Response Body: {response.text}")
+            
             if response.status_code == 201:
                 product = response.json().get('product')
                 logging.info(f"SUCCESS: Product creation successful: {product.get('title')} (ID: {product.get('id')})")
@@ -66,59 +72,44 @@ class ShopifyAPIClient:
             logging.error(f"EXCEPTION during Shopify API call: {e}", exc_info=True)
             return None
 
-def process_video_file(bucket_name, file_name):
-    with tempfile.TemporaryDirectory() as temp_dir:
-        try:
-            # ★★★★★ ここからが修正箇所 ★★★★★
-            # AIが生成したタイトルではなく、固定のテスト用タイトルを使用
-            generated_title = f"API Test Product - {file_name}"
-            tags = ["test", "api", "video"]
-            processed_url = "http://example.com/processed.mp4" # ダミーURL
-            original_url = "http://example.com/original.mp4" # ダミーURL
-            
-            logging.info(f"Step 5: Creating Shopify product with hardcoded title: {generated_title}")
-            shopify_access_token = get_shopify_access_token()
-            client = ShopifyAPIClient(SHOPIFY_SHOP_DOMAIN, shopify_access_token)
-            
-            product_payload = {
-                "product": {
-                    "title": generated_title,
-                    "body_html": "<strong>This is a test product created via API call.</strong>",
-                    "vendor": "API Test",
-                    "product_type": "Digital Goods",
-                    "status": "draft",
-                    "tags": ", ".join(tags),
-                    "variants": [{"price": str(DEFAULT_PRODUCT_PRICE)}],
-                    "metafields": [
-                        {"namespace": "custom", "key": "preview_video_url", "value": processed_url, "type": "url"},
-                        {"namespace": "custom", "key": "main_video_url", "value": original_url, "type": "url"},
-                        {"namespace": "custom", "key": "ai_tags", "value": json.dumps(tags), "type": "list.single_line_text_field"}
-                    ]
-                }
-            }
-            # ★★★★★ ここまでが修正箇所 ★★★★★
-
-            result = client.create_product(product_payload)
-
-            if result:
-                logging.info(f"END: All processing completed successfully for {file_name}")
-            else:
-                raise Exception("Shopify product creation failed. See previous logs for details.")
-        except Exception as e:
-            logging.error(f"CRITICAL ERROR in process_video_file for {file_name}: {e}", exc_info=True)
-            # raise e をコメントアウトすることで、Cloud Runがリトライし続けるのを防ぐ
-
-@app.route('/', methods=['POST'])
-def index():
+@app.route('/test-shopify', methods=['GET'])
+def shopify_test_endpoint():
+    """ShopifyへのAPI呼び出しだけをテストする診断用エンドポイント"""
+    logging.info("--- Shopify Test Endpoint Triggered ---")
     try:
-        event_data = request.get_json()
-        if not event_data or 'bucket' not in event_data or 'name' not in event_data:
-            return "Bad Request: Invalid event payload", 400
-        # 今回は動画処理をスキップし、Shopifyへの登録テストだけを実行
-        process_video_file(event_data['bucket'], event_data['name'])
-        return "OK", 200
+        token = get_shopify_access_token()
+        if not token:
+            return "Failed to get Shopify token from Secret Manager", 500
+
+        client = ShopifyAPIClient(SHOPIFY_SHOP_DOMAIN, token)
+        
+        test_product_payload = {
+            "product": {
+                "title": f"API Test Product - {os.urandom(4).hex()}",
+                "body_html": "<strong>This is a test product created via API call.</strong>",
+                "vendor": "API Test",
+                "product_type": "Digital Goods",
+                "status": "draft"
+            }
+        }
+        
+        result = client.create_product(test_product_payload)
+        
+        if result:
+            return f"<h1>Success!</h1><p>Product created with ID: {result.get('id')}</p><pre>{json.dumps(result, indent=2, ensure_ascii=False)}</pre>", 200
+        else:
+            return "<h1>Failed.</h1><p>Check the Cloud Run logs for detailed request/response information.</p>", 500
+            
     except Exception as e:
-        return f"Internal Server Error: {e}", 500
+        logging.error(f"Critical error in /test-shopify endpoint: {e}", exc_info=True)
+        return f"<h1>Internal Server Error</h1><p>{traceback.format_exc()}</p>", 500
+
+@app.route('/')
+def index():
+    """メインの動画処理エンドポイント（現在は診断のため無効化）"""
+    logging.info("Main endpoint received a request, but is currently disabled for testing.")
+    return "OK, but video processing is disabled pending diagnostics.", 200
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
