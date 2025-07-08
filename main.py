@@ -26,11 +26,36 @@ app = Flask(__name__)
 
 # --- Helper Functions ---
 def get_secret(secret_name: str) -> str:
-    """Fetches a secret from Google Cloud Secret Manager."""
+    """Fetches a secret from Google Cloud Secret Manager with enhanced cleaning."""
     try:
         full_secret_name = f"projects/{PROJECT_ID}/secrets/{secret_name}/versions/latest"
         response = secret_client.access_secret_version(request={"name": full_secret_name})
-        return response.payload.data.decode("UTF-8").strip()
+        
+        # バイトデータを取得
+        raw_data = response.payload.data
+        logging.info(f"Secret '{secret_name}' - Raw data type: {type(raw_data)}, length: {len(raw_data)}")
+        
+        # UTF-8でデコード
+        token = raw_data.decode("UTF-8")
+        logging.info(f"Secret '{secret_name}' - After decode type: {type(token)}, length: {len(token)}")
+        
+        # BOMを除去（UTF-8 BOM: \ufeff）
+        if token.startswith('\ufeff'):
+            logging.info(f"Secret '{secret_name}' - Removing UTF-8 BOM")
+            token = token[1:]
+        
+        # 前後の空白、改行、制御文字を除去
+        original_length = len(token)
+        token = token.strip().replace('\n', '').replace('\r', '').replace('\t', '')
+        
+        if len(token) != original_length:
+            logging.info(f"Secret '{secret_name}' - Cleaned {original_length - len(token)} characters")
+        
+        # 最終確認
+        logging.info(f"Secret '{secret_name}' - Final type: {type(token)}, length: {len(token)}")
+        
+        return token
+        
     except Exception as e:
         logging.error(f"Failed to access secret: {secret_name}. Error: {e}", exc_info=True)
         raise
@@ -125,3 +150,4 @@ def index():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+
